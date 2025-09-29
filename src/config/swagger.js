@@ -7,7 +7,7 @@ const options = {
     info: {
       title: "Sociality API",
       version: "1.0.0",
-      description: "REST API untuk Sociality (Express + Prisma + PostgreSQL)",
+      description: "REST API Sociality coding by Henry Rivardo",
     },
     servers: [{ url: process.env.SWAGGER_BASE_URL || "http://localhost:8080" }],
     components: {
