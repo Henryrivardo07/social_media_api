@@ -1,0 +1,104 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")   // pooler, untuk runtime app
+  directUrl = env("DIRECT_URL")     // direct, untuk prisma migrate/pull
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  username  String   @unique
+  email     String   @unique
+  phone     String?  @unique
+  password  String
+  avatarUrl String?
+  bio       String?
+
+  posts     Post[]
+  likes     Like[]
+  comments  Comment[]
+  saves     Save[]
+
+  // self-follow relation (follower/following)
+  following Follow[] @relation("UserFollowsFollowing") // this user follows others
+  followers Follow[] @relation("UserFollowing")        // others follow this user
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Post {
+  id            Int       @id @default(autoincrement())
+  userId        Int
+  caption       String?
+  imageUrl      String
+  likeCount     Int       @default(0)
+  commentCount  Int       @default(0)
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  likes    Like[]
+  comments Comment[]
+  saves    Save[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, createdAt])
+}
+
+model Follow {
+  followerId Int
+  followingId Int
+
+  follower  User @relation("UserFollowsFollowing", fields: [followerId], references: [id], onDelete: Cascade)
+  following User @relation("UserFollowing",        fields: [followingId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([followerId, followingId])
+  @@index([followingId])
+}
+
+model Like {
+  userId Int
+  postId Int
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([userId, postId])
+  @@index([postId])
+}
+
+model Comment {
+  id      Int    @id @default(autoincrement())
+  userId  Int
+  postId  Int
+  content String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([postId, createdAt])
+}
+
+model Save {
+  userId Int
+  postId Int
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([userId, postId])
+  @@index([postId])
+}
