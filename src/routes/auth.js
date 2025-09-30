@@ -1,3 +1,4 @@
+// src/routes/auth.js
 const router = require("express").Router();
 const { body } = require("express-validator");
 const bcrypt = require("bcryptjs");
@@ -9,8 +10,8 @@ const { successResponse, errorResponse } = require("../utils/response");
 /**
  * @swagger
  * tags:
- *   name: Auth
- *   description: Authentication
+ *   - name: Auth
+ *     description: Authentication (Register & Login)
  */
 
 /**
@@ -27,22 +28,28 @@ const { successResponse, errorResponse } = require("../utils/response");
  *             type: object
  *             required: [name, username, email, password]
  *             properties:
- *               name: { type: string }
- *               username: { type: string }
- *               email: { type: string }
- *               phone: { type: string }
- *               password: { type: string, format: password }
+ *               name:      { type: string, example: "John Doe" }
+ *               username:  { type: string, example: "johndoe" }
+ *               email:     { type: string, example: "john@email.com" }
+ *               phone:     { type: string, example: "081234567890" }
+ *               password:  { type: string, minLength: 6, example: "secret123" }
  *     responses:
- *       200: { description: User registered }
+ *       201: { description: Registered }
  *       400: { description: Validation or duplicate error }
  */
 router.post(
   "/register",
   [
-    body("name").isString().isLength({ min: 2 }),
-    body("username").isString().isLength({ min: 3 }),
-    body("email").isEmail(),
-    body("password").isLength({ min: 6 }),
+    body("name")
+      .isString()
+      .isLength({ min: 2 })
+      .withMessage("Name is required"),
+    body("username")
+      .isString()
+      .isLength({ min: 3 })
+      .withMessage("Username min 3 chars"),
+    body("email").isEmail().withMessage("Valid email required"),
+    body("password").isLength({ min: 6 }).withMessage("Password min 6 chars"),
     body("phone").optional().isString(),
   ],
   handleValidationErrors,
@@ -50,26 +57,53 @@ router.post(
     try {
       const { name, username, email, phone, password } = req.body;
 
-      // cek unik
+      // Cek unik email, username, dan phone (jika dikirim)
       const existing = await prisma.user.findFirst({
-        where: { OR: [{ email }, { username }] },
+        where: {
+          OR: [{ email }, { username }, ...(phone ? [{ phone }] : [])],
+        },
+        select: { email: true, username: true, phone: true },
       });
-      if (existing)
-        return errorResponse(res, "Email/username already in use", 400);
+
+      if (existing) {
+        if (existing.email === email)
+          return errorResponse(res, "Email already in use", 400);
+        if (existing.username === username)
+          return errorResponse(res, "Username already in use", 400);
+        if (phone && existing.phone === phone)
+          return errorResponse(res, "Phone already in use", 400);
+      }
 
       const hashed = await bcrypt.hash(password, 10);
 
       const user = await prisma.user.create({
-        data: { name, username, email, phone, password: hashed },
+        data: { name, username, email, phone: phone || null, password: hashed },
+        select: {
+          id: true,
+          name: true,
+          username: true,
+          email: true,
+          phone: true,
+          avatarUrl: true,
+        },
       });
 
-      return successResponse(
-        res,
+      const token = jwt.sign(
         { id: user.id, username: user.username },
-        "Registered"
+        process.env.JWT_SECRET,
+        { expiresIn: process.env.JWT_EXPIRES_IN || "7d" }
       );
+
+      return successResponse(res, { token, user }, "Registered", 201);
     } catch (e) {
-      console.error(e);
+      // Tangkap unique constraint (antisipasi race condition)
+      if (e?.code === "P2002") {
+        const field = Array.isArray(e.meta?.target)
+          ? e.meta.target[0]
+          : "field";
+        return errorResponse(res, `${field} already in use`, 400);
+      }
+      console.error("Register error:", e);
       return errorResponse(res);
     }
   }
@@ -89,15 +123,20 @@ router.post(
  *             type: object
  *             required: [email, password]
  *             properties:
- *               email: { type: string }
- *               password: { type: string, format: password }
+ *               email:    { type: string, example: "john@email.com" }
+ *               password: { type: string, minLength: 6, example: "secret123" }
  *     responses:
- *       200: { description: Login success }
- *       401: { description: Invalid credentials }
+ *       200:
+ *         description: Login success
+ *       401:
+ *         description: Invalid credentials
  */
 router.post(
   "/login",
-  [body("email").isEmail(), body("password").isLength({ min: 6 })],
+  [
+    body("email").isEmail().withMessage("Valid email required"),
+    body("password").isLength({ min: 6 }).withMessage("Invalid password"),
+  ],
   handleValidationErrors,
   async (req, res) => {
     try {
@@ -106,8 +145,8 @@ router.post(
       const user = await prisma.user.findUnique({ where: { email } });
       if (!user) return errorResponse(res, "Invalid credentials", 401);
 
-      const match = await bcrypt.compare(password, user.password);
-      if (!match) return errorResponse(res, "Invalid credentials", 401);
+      const ok = await bcrypt.compare(password, user.password);
+      if (!ok) return errorResponse(res, "Invalid credentials", 401);
 
       const token = jwt.sign(
         { id: user.id, username: user.username },
@@ -115,9 +154,23 @@ router.post(
         { expiresIn: process.env.JWT_EXPIRES_IN || "7d" }
       );
 
-      return successResponse(res, { token }, "Login success");
+      return successResponse(
+        res,
+        {
+          token,
+          user: {
+            id: user.id,
+            name: user.name,
+            username: user.username,
+            email: user.email,
+            phone: user.phone,
+            avatarUrl: user.avatarUrl,
+          },
+        },
+        "Login success"
+      );
     } catch (e) {
-      console.error(e);
+      console.error("Login error:", e);
       return errorResponse(res);
     }
   }
