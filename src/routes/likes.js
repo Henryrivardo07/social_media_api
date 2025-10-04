@@ -1,20 +1,25 @@
+// src/routes/likes.js
 const router = require("express").Router();
+const jwt = require("jsonwebtoken");
 const { param, query } = require("express-validator");
 const { prisma } = require("../config/database");
-const { authenticateToken } = require("../middleware/auth");
 const { handleValidationErrors } = require("../middleware/validation");
+const { authenticateToken } = require("../middleware/auth");
 const { successResponse, errorResponse } = require("../utils/response");
 
-/**
- * @swagger
- * tags:
- *   - name: Likes
- *     description: Like/Unlike post dan daftar "Liked" milik user
- */
+/** ===== optionalAuth: tidak wajib login, tapi kalau ada token -> set req.user ===== */
+function optionalAuth(req, _res, next) {
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token) return next();
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET); // { id, username? }
+    req.user = decoded;
+  } catch {}
+  next();
+}
 
-/**
- * Helper: ubah record Like -> post summary ringkas
- */
+/** Helper: Like row -> post summary ringkas */
 function toPostSummaryFromLike(likeRow, likedByViewer) {
   const p = likeRow.post;
   if (!p) return null;
@@ -35,6 +40,13 @@ function toPostSummaryFromLike(likeRow, likedByViewer) {
     },
   };
 }
+
+/**
+ * @swagger
+ * tags:
+ *   - name: Likes
+ *     description: Like/Unlike post dan daftar "Liked" milik user
+ */
 
 /**
  * @swagger
@@ -64,7 +76,6 @@ router.post(
       const post = await prisma.post.findUnique({ where: { id: postId } });
       if (!post) return errorResponse(res, "Post not found", 404);
 
-      // sudah like?
       const exists = await prisma.like.findUnique({
         where: { userId_postId: { userId, postId } },
       });
@@ -76,7 +87,6 @@ router.post(
         );
       }
 
-      // transaksi: create like + increment counter
       const updated = await prisma.$transaction(async (tx) => {
         await tx.like.create({ data: { userId, postId } });
         const up = await tx.post.update({
@@ -165,7 +175,11 @@ router.delete(
  * /api/posts/{id}/likes:
  *   get:
  *     summary: List users who liked a post
+ *     description: |
+ *       Publik (tanpa token) tetap bisa dipanggil.
+ *       Jika mengirim Bearer token, respons akan menyertakan flag `isFollowedByMe`, `isMe`, dan `followsMe`.
  *     tags: [Likes]
+ *     security: [ { bearerAuth: [] } ]   # <— supaya Swagger mengirim Authorization header
  *     parameters:
  *       - in: path
  *         name: id
@@ -183,6 +197,7 @@ router.delete(
  */
 router.get(
   "/posts/:id/likes",
+  optionalAuth, // <— penting: agar req.user terbaca kalau ada token
   [
     param("id").isInt({ min: 1 }),
     query("page").optional().isInt({ min: 1 }),
@@ -190,13 +205,15 @@ router.get(
   ],
   handleValidationErrors,
   async (req, res) => {
+    const viewerId = req.user?.id || null;
     const postId = Number(req.params.id);
     const { page = 1, limit = 20 } = req.query;
+
     try {
       const post = await prisma.post.findUnique({ where: { id: postId } });
       if (!post) return errorResponse(res, "Post not found", 404);
 
-      const [items, total] = await Promise.all([
+      const [rows, total] = await Promise.all([
         prisma.like.findMany({
           where: { postId },
           orderBy: { createdAt: "desc" },
@@ -211,8 +228,39 @@ router.get(
         prisma.like.count({ where: { postId } }),
       ]);
 
+      const usersBasic = rows.map((l) => l.user).filter(Boolean);
+      const ids = usersBasic.map((u) => u.id);
+
+      let followedByMeSet = new Set();
+      let followsMeSet = new Set();
+
+      if (viewerId && ids.length) {
+        const [iFollow, theyFollowMe] = await Promise.all([
+          prisma.follow.findMany({
+            where: { followerId: viewerId, followingId: { in: ids } },
+            select: { followingId: true },
+          }),
+          prisma.follow.findMany({
+            where: { followerId: { in: ids }, followingId: viewerId },
+            select: { followerId: true },
+          }),
+        ]);
+        followedByMeSet = new Set(iFollow.map((r) => r.followingId));
+        followsMeSet = new Set(theyFollowMe.map((r) => r.followerId));
+      }
+
+      const users = usersBasic.map((u) => ({
+        id: u.id,
+        username: u.username,
+        name: u.name,
+        avatarUrl: u.avatarUrl,
+        isFollowedByMe: viewerId ? followedByMeSet.has(u.id) : false,
+        isMe: viewerId ? u.id === viewerId : false,
+        followsMe: viewerId ? followsMeSet.has(u.id) : false,
+      }));
+
       return successResponse(res, {
-        users: items.map((l) => ({ ...l.user })),
+        users,
         pagination: {
           page: Number(page),
           limit: Number(limit),
@@ -221,7 +269,7 @@ router.get(
         },
       });
     } catch (e) {
-      console.error(e);
+      console.error("List likes error:", e);
       return errorResponse(res);
     }
   }
@@ -330,6 +378,7 @@ router.get(
  */
 router.get(
   "/me/likes",
+  // viewer wajib login di sini
   authenticateToken,
   [
     query("page").optional().isInt({ min: 1 }),
